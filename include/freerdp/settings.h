@@ -278,8 +278,13 @@ typedef enum
 #define LB_TARGET_NET_ADDRESSES 0x00000800
 #define LB_CLIENT_TSV_URL 0x00001000
 #define LB_SERVER_TSV_CAPABLE 0x00002000
+#define LB_PASSWORD_IS_PK_ENCRYPTED 0x00004000
+#define LB_REDIRECTION_GUID 0x00008000
+#define LB_TARGET_CERTIFICATE 0x00010000
 
 #define LB_PASSWORD_MAX_LENGTH 512
+
+#define ELEMENT_TYPE_CERTIFICATE 32
 
 /* Keyboard Hook */
 #define KEYBOARD_HOOK_LOCAL 0
@@ -384,6 +389,15 @@ typedef struct
 	DWORD PrivateExponentLength;
 	BYTE exponent[4];
 } rdpRsaKey;
+
+struct _CERTIFICATE_META_ELEMENT
+{
+	UINT32 type;
+	UINT32 encoding;
+	UINT32 element_size;
+	BYTE* element_data;
+};
+typedef struct _CERTIFICATE_META_ELEMENT CERTIFICATE_META_ELEMENT;
 
 /* Channels */
 

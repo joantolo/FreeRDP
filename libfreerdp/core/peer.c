@@ -1227,9 +1227,10 @@ static BOOL freerdp_peer_send_channel_data(freerdp_peer* client, UINT16 channelI
 
 static BOOL freerdp_peer_send_server_redirection_pdu(
     freerdp_peer* peer, UINT32 sessionId, const char* targetNetAddress, const char* routingToken,
-    const char* userName, const char* domain, const char* password, const char* targetFQDN,
-    const char* targetNetBiosName, DWORD tsvUrlLength, const BYTE* tsvUrl,
-    UINT32 targetNetAddressesCount, const char** targetNetAddresses)
+    const char* userName, const char* domain, const char* password, const char* encryptedPassword,
+    const char* targetFQDN, const char* targetNetBiosName, DWORD tsvUrlLength, const BYTE* tsvUrl,
+    UINT32 targetNetAddressesCount, const char** targetNetAddresses, const BYTE* redirectionGuid,
+    const char* targetCertificate)
 {
 	wStream* s = rdp_send_stream_pdu_init(peer->context->rdp);
 	UINT16 length;
@@ -1244,6 +1245,8 @@ static BOOL freerdp_peer_send_server_redirection_pdu(
 	UINT32 targetNetBiosNameLength = 0;
 	UINT32 targetNetAddressesLength = 0;
 	UINT32* targetNetAddressesWLength = NULL;
+	UINT32 redirectionGuidLength = 0;
+	UINT32 targetCertificateLength = 0;
 
 	LPWSTR targetNetAddressW = NULL;
 	LPWSTR userNameW = NULL;
@@ -1252,6 +1255,8 @@ static BOOL freerdp_peer_send_server_redirection_pdu(
 	LPWSTR targetFQDNW = NULL;
 	LPWSTR targetNetBiosNameW = NULL;
 	LPWSTR* targetNetAddressesW = NULL;
+	LPWSTR base64RedirectionGuidW = NULL;
+	LPWSTR base64targetCertificateW = NULL;
 
 	length = 12; /* Flags (2) + length (2) + sessionId (4)  + redirection flags (4) */
 	redirFlags = 0;
@@ -1297,13 +1302,21 @@ static BOOL freerdp_peer_send_server_redirection_pdu(
 		length += 4 + domainLength;
 	}
 
-	if (password)
+	if (password || encryptedPassword)
 	{
 		size_t len = 0;
 		redirFlags |= LB_PASSWORD;
 
-		passwordW = ConvertUtf8ToWCharAlloc(password, &len);
-		passwordLength = (len + 1) * sizeof(WCHAR);
+		if (encryptedPassword)
+		{
+			redirFlags |= LB_PASSWORD_IS_PK_ENCRYPTED;
+			passwordLength = strlen(encryptedPassword);
+		}
+		else
+		{
+			passwordW = ConvertUtf8ToWCharAlloc(password, &len);
+			passwordLength = (len + 1) * sizeof(WCHAR);
+		}
 
 		length += 4 + passwordLength;
 	}
@@ -1356,6 +1369,71 @@ static BOOL freerdp_peer_send_server_redirection_pdu(
 		length += 4 + 4 + targetNetAddressesLength;
 	}
 
+	if (redirectionGuid)
+	{
+		size_t len = 0;
+		LPSTR base64RedirectionGuid = NULL;
+
+		redirFlags |= LB_REDIRECTION_GUID;
+
+		/* We assume redirecitonGUID is of 16 bytes */
+		base64RedirectionGuid = crypto_base64_encode(redirectionGuid, 16);
+
+		base64RedirectionGuidW = ConvertUtf8ToWCharAlloc(base64RedirectionGuid, &len);
+		redirectionGuidLength = (len + 1) * sizeof(WCHAR);
+
+		length += 4 + redirectionGuidLength;
+
+		free(base64RedirectionGuid);
+	}
+
+	if (targetCertificate)
+	{
+		size_t len = 0;
+		BIO* bio;
+		X509* x509;
+		INT32 asn1DerTargetCertificateLenth = 0;
+		INT32 targetCertificateContainerLength = 0;
+		BYTE* asn1DerTargetCertificate = NULL;
+		LPSTR base64targetCertificate = NULL;
+		BYTE* targetCertificateContainer = NULL;
+		CERTIFICATE_META_ELEMENT certificateMetaElement;
+
+		redirFlags |= LB_TARGET_CERTIFICATE;
+
+		bio = BIO_new_mem_buf(targetCertificate, strlen(targetCertificate));
+		x509 = PEM_read_bio_X509(bio, NULL, NULL, 0);
+		asn1DerTargetCertificateLenth = i2d_X509_AUX(x509, &asn1DerTargetCertificate);
+
+		certificateMetaElement.type = ELEMENT_TYPE_CERTIFICATE;
+		certificateMetaElement.encoding = X509_ASN_ENCODING;
+		certificateMetaElement.element_size = asn1DerTargetCertificateLenth;
+		certificateMetaElement.element_data = asn1DerTargetCertificate;
+
+		targetCertificateContainerLength = 4 + 4 + 4 + certificateMetaElement.element_size;
+		targetCertificateContainer = calloc(targetCertificateContainerLength, sizeof(BYTE));
+
+		CopyMemory(targetCertificateContainer, &certificateMetaElement.type, 4);
+		CopyMemory(&targetCertificateContainer[4], &certificateMetaElement.encoding, 4);
+		CopyMemory(&targetCertificateContainer[8], &certificateMetaElement.element_size, 4);
+		CopyMemory(&targetCertificateContainer[12], &certificateMetaElement.element_data[0],
+		           certificateMetaElement.element_size);
+
+		base64targetCertificate =
+		    crypto_base64_encode(targetCertificateContainer, targetCertificateContainerLength);
+
+		base64targetCertificateW = ConvertUtf8ToWCharAlloc(base64targetCertificate, &len);
+		targetCertificateLength = (len + 1) * sizeof(WCHAR);
+
+		length += 4 + targetCertificateLength;
+
+		BIO_free_all(bio);
+		X509_free(x509);
+		free(asn1DerTargetCertificate);
+		free(base64targetCertificate);
+		free(targetCertificateContainer);
+	}
+
 	Stream_Write_UINT16(s, 0);
 	Stream_Write_UINT16(s, SEC_REDIRECTION_PKT);
 	Stream_Write_UINT16(s, length);
@@ -1406,7 +1484,12 @@ static BOOL freerdp_peer_send_server_redirection_pdu(
 	if (redirFlags & LB_PASSWORD)
 	{
 		Stream_Write_UINT32(s, passwordLength);
-		Stream_Write(s, passwordW, passwordLength);
+
+		if (redirFlags & LB_PASSWORD_IS_PK_ENCRYPTED)
+			Stream_Write(s, encryptedPassword, passwordLength);
+		else
+			Stream_Write(s, passwordW, passwordLength);
+
 		free(passwordW);
 	}
 
@@ -1445,6 +1528,20 @@ static BOOL freerdp_peer_send_server_redirection_pdu(
 		free(targetNetAddressesWLength);
 	}
 
+	if (redirFlags & LB_REDIRECTION_GUID)
+	{
+		Stream_Write_UINT32(s, redirectionGuidLength);
+		Stream_Write(s, base64RedirectionGuidW, redirectionGuidLength);
+		free(base64RedirectionGuidW);
+	}
+
+	if (redirFlags & LB_TARGET_CERTIFICATE)
+	{
+		Stream_Write_UINT32(s, targetCertificateLength);
+		Stream_Write(s, base64targetCertificateW, targetCertificateLength);
+		free(base64targetCertificateW);
+	}
+
 	Stream_Write_UINT8(s, 0);
 	rdp_send_pdu(peer->context->rdp, s, PDU_TYPE_SERVER_REDIRECTION, 0);
 
@@ -1458,6 +1555,8 @@ fail:
 	free(targetFQDNW);
 	free(targetNetBiosNameW);
 	free(targetNetAddressesWLength);
+	free(base64RedirectionGuidW);
+	free(base64targetCertificateW);
 
 	if (targetNetAddressesCount > 0)
 	{
